@@ -20,6 +20,49 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// applyResponsesSystemPromptIfNeeded mirrors the channel system prompt
+// injection of the Chat Completions path (applySystemPromptIfNeeded) for the
+// Responses API, where the system prompt lives in the top-level `instructions`
+// string field instead of a system message.
+func applyResponsesSystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, request *dto.OpenAIResponsesRequest) {
+	if info == nil || request == nil {
+		return
+	}
+	prompt := info.ChannelSetting.SystemPrompt
+	if prompt == "" {
+		return
+	}
+
+	if len(request.Instructions) == 0 || string(request.Instructions) == "null" {
+		encoded, err := common.Marshal(prompt)
+		if err != nil {
+			return
+		}
+		request.Instructions = encoded
+		return
+	}
+
+	if !info.ChannelSetting.SystemPromptOverride {
+		return
+	}
+
+	var existing string
+	if err := common.Unmarshal(request.Instructions, &existing); err != nil {
+		// instructions is not a JSON string; leave unknown shapes untouched
+		return
+	}
+	common.SetContextKey(c, appconstant.ContextKeySystemPromptOverride, true)
+	merged := prompt
+	if strings.TrimSpace(existing) != "" {
+		merged = prompt + "\n" + existing
+	}
+	encoded, err := common.Marshal(merged)
+	if err != nil {
+		return
+	}
+	request.Instructions = encoded
+}
+
 func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
@@ -78,6 +121,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 		requestBody = common.ReaderOnly(storage)
 	} else {
+		applyResponsesSystemPromptIfNeeded(c, info, request)
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
